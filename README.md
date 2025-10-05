@@ -37,6 +37,9 @@ in deinen Kalender bringt. Zwei Wege sind vorbereitet:
    # python untis_to_caldav.py  # schiebt in iCloud-Kalender
    ```
 
+   > Zeitraum anpassen? Über die Variablen `UNTIS_DAYS_BACK` (Vergangenheit) und `UNTIS_DAYS_FORWARD`
+   > bzw. `UNTIS_LOOKAHEAD_DAYS` (Fallback, Standard 14) steuerst du, wie viel vom Stundenplan geladen wird.
+
 3. **GitHub Actions aktivieren (stündlich):**
    - Repo auf GitHub pushen
    - Unter **Settings → Pages** → Branch `main`, Ordner `/docs` wählen
@@ -56,7 +59,7 @@ in deinen Kalender bringt. Zwei Wege sind vorbereitet:
 
 ## Technische Details
 
-- Holt den Plan für **heute bis +14 Tage** (anpassbar).
+- Holt den Plan für **heute bis +14 Tage** (per `UNTIS_DAYS_BACK`, `UNTIS_DAYS_FORWARD` bzw. `UNTIS_LOOKAHEAD_DAYS` konfigurierbar).
 - Dedupliziert/aktualisiert via UID pro Event (Datum-Fach-Raum-Lehrer).
 - Konvertiert WebUntis-Fächer/Kürzel in lesbare Titel (anpassbar).
 - Zeitzone standardmäßig `Europe/Berlin`.

@@ -83,17 +83,7 @@ def main():
 
         cal = Calendar()
 
-        for l in lessons:
-            # Begin/Ende (0.1.x liefert meist naive Datetimes in lokaler TZ)
-            try:
-                begin = tz.localize(l.start)
-                finish = tz.localize(l.end)
-            except Exception:
-                begin = l.start
-                finish = l.end
-
-            subject = getattr(l, "subject", None)
-            # Fach
+        # Fach
 subject_name = "Unterricht"
 try:
     subject = getattr(l, "subject", None)
@@ -103,7 +93,7 @@ try:
         or "Unterricht"
     )
 except Exception:
-    pass
+    subject_name = "Unterricht"
 
 # Räume (defensiv)
 room = ""

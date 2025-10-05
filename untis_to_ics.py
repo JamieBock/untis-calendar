@@ -14,14 +14,14 @@ def get_env(name, default=None, required=False):
     return v
 
 def login_session():
-    s = webuntis.Session(
-        server=get_env("WEBUNTIS_SERVER", required=True),
-        school=get_env("WEBUNTIS_SCHOOL", required=True),
-        username=get_env("WEBUNTIS_USERNAME", required=True),
-        password=get_env("WEBUNTIS_PASSWORD", required=True),
-        useragent=get_env("WEBUNTIS_CLIENT", "untis-cal-sync"),
-        jsonrpc_endpoint="/WebUntis/jsonrpc.do",
-    )
+   s = webuntis.Session(
+    server=get_env("WEBUNTIS_SERVER", required=True),
+    school=get_env("WEBUNTIS_SCHOOL", required=True),
+    username=get_env("WEBUNTIS_USERNAME", required=True),
+    password=get_env("WEBUNTIS_PASSWORD", required=True),
+    useragent=get_env("WEBUNTIS_CLIENT", "untis-cal-sync"),
+)
+
     return s.login()
 
 def pick_scope(session):

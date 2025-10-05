@@ -14,7 +14,7 @@ def get_env(name, default=None, required=False):
     return v
 
 def login_session():
-   s = webuntis.Session(
+    s = webuntis.Session(
         server=get_env("WEBUNTIS_SERVER", required=True),
         school=get_env("WEBUNTIS_SCHOOL", required=True),
         username=get_env("WEBUNTIS_USERNAME", required=True),
@@ -24,7 +24,7 @@ def login_session():
     return s.login()
 
 def pick_scope(session):
-    # Versuch 1: Eigene Person ermitteln (funktioniert i.d.R. für Schüler-Accounts)
+    # Versuch: eigene Person (funktioniert i. d. R. bei Schüler:innen)
     try:
         me = session.get_current_user()
         if me and hasattr(me, "personType") and me.personType and me.personId:
@@ -42,22 +42,19 @@ def pick_scope(session):
         return {"teacherId": int(tid)}
     if cid:
         return {"classId": int(cid)}
-
-    raise RuntimeError("Konnte keinen Scope bestimmen (kein get_current_user und keine IDs in .env).")
+    raise RuntimeError("Konnte keinen Scope bestimmen (weder get_current_user noch IDs in .env).")
 
 def fetch_timetable(session, scope, start, end):
-    # webuntis-lib akzeptiert keyword je nach Scope
     kw = {"start": start, "end": end}
     if "studentId" in scope:
         kw["studentId"] = scope["studentId"]
     elif "teacherId" in scope:
         kw["teacherId"] = scope["teacherId"]
     elif "classId" in scope:
-        kw["klasseId"] = scope["classId"]
+        kw["klasseId"] = scope["classId"]  # webuntis 0.1.x nutzt 'klasseId'
     elif "personType" in scope and "personId" in scope:
         kw["personType"] = scope["personType"]
         kw["personId"] = scope["personId"]
-
     return session.timetable(**kw)
 
 def main():
@@ -77,25 +74,22 @@ def main():
         lessons = fetch_timetable(session, scope, start, end)
 
         cal = Calendar()
+
         for l in lessons:
-            # l enthält u. a.: start, end (datetime naive, Europe/Berlin), subject, room, teacher, code (=cancelled? substitution?)
-            # Library liefert Felder je nach Version. Wir versuchen defensiv zu lesen.
+            # Begin/Ende (0.1.x liefert meist naive Datetimes in lokaler TZ)
             try:
                 begin = tz.localize(l.start)
                 finish = tz.localize(l.end)
             except Exception:
-                # Falls schon aware:
                 begin = l.start
                 finish = l.end
 
             subject = getattr(l, "subject", None)
             subject_name = getattr(subject, "long_name", None) or getattr(subject, "name", None) or "Unterricht"
             room = ", ".join(r.name for r in getattr(l, "rooms", []) if hasattr(r, "name")) or ""
-            teachers = ", ".join(t.long_name or t.name for t in getattr(l, "teachers", []) if hasattr(t, "name"))
+            teachers = ", ".join((getattr(t, "long_name", None) or getattr(t, "name", "")) for t in getattr(l, "teachers", []) if hasattr(t, "name"))
 
-            title = subject_name
-            if room:
-                title += f" · {room}"
+            title = subject_name + (f" · {room}" if room else "")
 
             e = Event()
             e.name = title
@@ -103,23 +97,19 @@ def main():
             e.end = finish
             e.location = room or None
 
-            notes_parts = []
+            notes = []
             if teachers:
-                notes_parts.append(f"Lehrkraft: {teachers}")
+                notes.append(f"Lehrkraft: {teachers}")
             code = getattr(l, "code", None)
             if code:
-                notes_parts.append(f"Code: {code}")
+                notes.append(f"Code: {code}")
             if getattr(l, "substText", None):
-                notes_parts.append(f"Hinweis: {l.substText}")
+                notes.append(f"Hinweis: {l.substText}")
+            if notes:
+                e.description = "\n".join(notes)
 
-            if notes_parts:
-                e.description = "\n".join(notes_parts)
+            e.uid = f"{begin.isoformat()}|{subject_name}|{room}|{teachers}"
 
-            # UID stabilisieren
-            uid_key = f"{begin.isoformat()}|{subject_name}|{room}|{teachers}"
-            e.uid = uid_key
-
-            # Entfall markieren
             if getattr(l, "is_cancelled", False) or str(getattr(l, "code", "")).upper() in {"CANCELLED", "CANC"}:
                 e.status = "CANCELLED"
 
@@ -127,7 +117,6 @@ def main():
 
         with open(out_path, "w", encoding="utf-8") as f:
             f.writelines(cal.serialize_iter())
-
         print(f"ICS geschrieben: {out_path}")
     finally:
         try:

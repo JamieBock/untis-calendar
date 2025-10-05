@@ -24,15 +24,7 @@ def login_session():
     return s.login()
 
 def pick_scope(session):
-    # Versuch: eigene Person (funktioniert i. d. R. bei Schüler:innen)
-    try:
-        me = session.get_current_user()
-        if me and hasattr(me, "personType") and me.personType and me.personId:
-            return {"personType": me.personType, "personId": me.personId}
-    except Exception:
-        pass
-
-    # Fallback: IDs aus .env
+    # 1) IDs aus ENV (empfohlen bei neuem Perseus-Frontend / SSO)
     sid = os.getenv("UNTIS_STUDENT_ID")
     tid = os.getenv("UNTIS_TEACHER_ID")
     cid = os.getenv("UNTIS_CLASS_ID")
@@ -42,11 +34,20 @@ def pick_scope(session):
         return {"teacherId": int(tid)}
     if cid:
         return {"classId": int(cid)}
-    raise RuntimeError("Konnte keinen Scope bestimmen (weder get_current_user noch IDs in .env).")
+
+    # 2) Fallback: current user (funktioniert bei klassischem Login)
+    try:
+        me = session.get_current_user()
+        if me and hasattr(me, "personType") and me.personType and me.personId:
+            return {"personType": me.personType, "personId": me.personId}
+    except Exception:
+        pass
+
+    raise RuntimeError("Konnte keinen Scope bestimmen (weder ENV-IDs noch get_current_user()).")
 
 def fetch_timetable(session, scope, start, end):
+    # webuntis 0.1.x erwartet 'student' / 'klasse' / 'teacher' als Keyword
     kw = {"start": start, "end": end}
-
     if "studentId" in scope:
         kw["student"] = int(scope["studentId"])
     elif "teacherId" in scope:
@@ -54,16 +55,15 @@ def fetch_timetable(session, scope, start, end):
     elif "classId" in scope:
         kw["klasse"] = int(scope["classId"])
     elif "personType" in scope and "personId" in scope:
-        # fallback
-        if scope["personType"] == 5:
+        if int(scope["personType"]) == 5:
             kw["student"] = int(scope["personId"])
-        elif scope["personType"] == 2:
+        elif int(scope["personType"]) == 2:
             kw["teacher"] = int(scope["personId"])
-        elif scope["personType"] == 1:
+        elif int(scope["personType"]) == 1:
             kw["klasse"] = int(scope["personId"])
-
+    else:
+        raise RuntimeError("Unbekannter Scope für timetable().")
     return session.timetable(**kw)
-
 
 def main():
     load_dotenv()
@@ -83,52 +83,62 @@ def main():
 
         cal = Calendar()
 
-        # Fach
-subject_name = "Unterricht"
-try:
-    subject = getattr(l, "subject", None)
-    subject_name = (
-        getattr(subject, "long_name", None)
-        or getattr(subject, "name", None)
-        or "Unterricht"
-    )
-except Exception:
-    subject_name = "Unterricht"
-
-# Räume (defensiv)
-room = ""
-try:
-    rs = getattr(l, "rooms", None)
-    if rs:
-        rnames = []
-        for r in rs:
+        for l in lessons:
+            # Zeiten (defensiv)
             try:
-                nm = getattr(r, "name", None) or getattr(r, "long_name", None)
-                if nm:
-                    rnames.append(nm)
+                begin = tz.localize(l.start)
+                finish = tz.localize(l.end)
             except Exception:
-                continue
-        room = ", ".join(rnames)
-except Exception:
-    room = ""
+                begin = getattr(l, "start", None)
+                finish = getattr(l, "end", None)
+            if not begin or not finish:
+                continue  # ohne Zeiten kein Termin
 
-# Lehrkräfte (defensiv)
-teachers = ""
-try:
-    ts = getattr(l, "teachers", None)
-    if ts:
-        tnames = []
-        for t in ts:
+            # Fach (defensiv)
+            subject_name = "Unterricht"
             try:
-                nm = getattr(t, "long_name", None) or getattr(t, "name", None)
-                if nm:
-                    tnames.append(nm)
+                subject = getattr(l, "subject", None)
+                subject_name = (
+                    getattr(subject, "long_name", None)
+                    or getattr(subject, "name", None)
+                    or "Unterricht"
+                )
             except Exception:
-                continue
-        teachers = ", ".join(tnames)
-except Exception:
-    teachers = ""
+                subject_name = "Unterricht"
 
+            # Räume (defensiv)
+            room = ""
+            try:
+                rs = getattr(l, "rooms", None)
+                if rs:
+                    rnames = []
+                    for r in rs:
+                        try:
+                            nm = getattr(r, "name", None) or getattr(r, "long_name", None)
+                            if nm:
+                                rnames.append(nm)
+                        except Exception:
+                            continue
+                    room = ", ".join(rnames)
+            except Exception:
+                room = ""
+
+            # Lehrkräfte (defensiv)
+            teachers = ""
+            try:
+                ts = getattr(l, "teachers", None)
+                if ts:
+                    tnames = []
+                    for t in ts:
+                        try:
+                            nm = getattr(t, "long_name", None) or getattr(t, "name", None)
+                            if nm:
+                                tnames.append(nm)
+                        except Exception:
+                            continue
+                    teachers = ", ".join(tnames)
+            except Exception:
+                teachers = ""
 
             title = subject_name + (f" · {room}" if room else "")
 

@@ -46,16 +46,24 @@ def pick_scope(session):
 
 def fetch_timetable(session, scope, start, end):
     kw = {"start": start, "end": end}
+
     if "studentId" in scope:
-        kw["studentId"] = scope["studentId"]
+        kw["student"] = int(scope["studentId"])
     elif "teacherId" in scope:
-        kw["teacherId"] = scope["teacherId"]
+        kw["teacher"] = int(scope["teacherId"])
     elif "classId" in scope:
-        kw["klasseId"] = scope["classId"]  # webuntis 0.1.x nutzt 'klasseId'
+        kw["klasse"] = int(scope["classId"])
     elif "personType" in scope and "personId" in scope:
-        kw["personType"] = scope["personType"]
-        kw["personId"] = scope["personId"]
+        # fallback
+        if scope["personType"] == 5:
+            kw["student"] = int(scope["personId"])
+        elif scope["personType"] == 2:
+            kw["teacher"] = int(scope["personId"])
+        elif scope["personType"] == 1:
+            kw["klasse"] = int(scope["personId"])
+
     return session.timetable(**kw)
+
 
 def main():
     load_dotenv()

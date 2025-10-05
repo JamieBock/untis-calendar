@@ -1,13 +1,13 @@
-import requests
 import os
 import sys
 import pytz
+import requests
 import webuntis
 from datetime import datetime, timedelta
 from ics import Calendar, Event
 from dotenv import load_dotenv
 
-# -------------------- env helpers --------------------
+# -------------------- ENV helpers --------------------
 def get_env(name, default=None, required=False):
     v = os.getenv(name, default)
     if required and not v:
@@ -15,7 +15,7 @@ def get_env(name, default=None, required=False):
         sys.exit(2)
     return v
 
-# -------------------- untis session --------------------
+# -------------------- WebUntis Session --------------------
 def login_session():
     s = webuntis.Session(
         server=get_env("WEBUNTIS_SERVER", required=True),
@@ -27,7 +27,6 @@ def login_session():
     return s.login()
 
 def pick_scope(session):
-    # IDs aus ENV (empfohlen bei neuem perseus-Frontend / SSO)
     sid = os.getenv("UNTIS_STUDENT_ID")
     tid = os.getenv("UNTIS_TEACHER_ID")
     cid = os.getenv("UNTIS_CLASS_ID")
@@ -37,7 +36,6 @@ def pick_scope(session):
         return {"teacherId": int(tid)}
     if cid:
         return {"classId": int(cid)}
-    # Fallback (klassischer Login)
     try:
         me = session.get_current_user()
         if me and hasattr(me, "personType") and me.personType and me.personId:
@@ -47,7 +45,6 @@ def pick_scope(session):
     raise RuntimeError("Konnte keinen Scope bestimmen (ENV-IDs setzen).")
 
 def fetch_timetable(session, scope, start, end):
-    # webuntis 0.1.x erwartet student/klasse/teacher als Keyword
     kw = {"start": start, "end": end}
     if "studentId" in scope:
         kw["student"] = int(scope["studentId"])
@@ -66,7 +63,7 @@ def fetch_timetable(session, scope, start, end):
         raise RuntimeError("Unbekannter Scope für timetable().")
     return session.timetable(**kw)
 
-# -------------------- resolvers (robust) --------------------
+# -------------------- Resolver --------------------
 def _safe_join(items):
     return ", ".join([x for x in items if x]) if items else ""
 
@@ -75,7 +72,6 @@ def resolve_subject_names(session, lesson):
         data = getattr(lesson, "_data", {}) or {}
         su = data.get("su", [])
         names = []
-        # IDs aus raw-Daten
         for x in su:
             try:
                 sid = x.get("id")
@@ -87,7 +83,6 @@ def resolve_subject_names(session, lesson):
                     names.append(nm)
             except Exception:
                 continue
-        # Fallback high-level
         if not names:
             s = getattr(lesson, "subject", None)
             nm = getattr(s, "long_name", None) or getattr(s, "name", None)
@@ -153,24 +148,55 @@ def resolve_room_names(session, lesson):
     except Exception:
         return []
 
+# -------------------- Status / Prüfungen --------------------
 def lesson_status(lesson):
     code = (getattr(lesson, "code", None) or "").lower()
     ltype = (getattr(lesson, "_data", {}).get("lstype") or "").lower()
-    info = getattr(lesson, "substText", None) or getattr(lesson, "info", None) or ""
-    prefix = ""
-    # Entfall
-    if getattr(lesson, "is_cancelled", False) or code in {"cancelled", "canc", "absent"}:
-        prefix = "Entfall"
-    # Vertretung
-    elif code in {"irregular", "subst", "assigned"}:
-        prefix = "Vertretung"
-    # Prüfung
-    if ("exam" in ltype) or any(k in info.lower() for k in ["prüfung", "klausur", "exam"]):
-        if not prefix:
-            prefix = "Prüfung"
-    return prefix, info.strip()
+    info = (getattr(lesson, "substText", None) or getattr(lesson, "info", None) or "").strip()
 
-# -------------------- main --------------------
+    is_cancel = getattr(lesson, "is_cancelled", False) or code in {"cancelled", "canc", "absent"}
+    is_subst = code in {"irregular", "subst", "assigned"}
+    is_exam = ("exam" in ltype) or any(k in info.lower() for k in ["prüfung", "klausur", "exam", "arbeit"])
+
+    if is_cancel:
+        return "Entfall", info
+    if is_exam:
+        return "Prüfung", info
+    if is_subst:
+        return "Vertretung", info
+    return "", info
+
+# -------------------- Hausaufgaben via REST --------------------
+def fetch_homeworks(session, student_id, start, end):
+    try:
+        base = f"https://{get_env('WEBUNTIS_SERVER', required=True)}/WebUntis/api/rest/view/v1/homeworks"
+        params = {
+            "resourceType": "STUDENT",
+            "resourceId": int(student_id),
+            "start": start.isoformat(),
+            "end": end.isoformat(),
+        }
+        rs = getattr(session, "_session", None) or requests.Session()
+        resp = rs.get(base, params=params, timeout=20)
+        resp.raise_for_status()
+        data = resp.json() if resp.content else []
+    except Exception:
+        return {}
+
+    hw = {}
+    for item in data or []:
+        try:
+            due = item.get("dueDate")
+            subj = item.get("subject", {}).get("id")
+            txt = (item.get("text") or "").strip()
+            if due and subj and txt:
+                key = (due, int(subj))
+                hw.setdefault(key, []).append(txt)
+        except Exception:
+            continue
+    return hw
+
+# -------------------- MAIN --------------------
 def main():
     load_dotenv()
     tzname = get_env("TIMEZONE", "Europe/Berlin")
@@ -187,10 +213,15 @@ def main():
         scope = pick_scope(session)
         lessons = fetch_timetable(session, scope, start, end)
 
+        student_id = os.getenv("UNTIS_STUDENT_ID")
+        homeworks = {}
+        if student_id:
+            homeworks = fetch_homeworks(session, int(student_id), start, end)
+
         cal = Calendar()
+        seen_uids = set()
 
         for l in lessons:
-            # Zeiten (defensiv)
             try:
                 begin = tz.localize(l.start)
                 finish = tz.localize(l.end)
@@ -200,7 +231,6 @@ def main():
             if not begin or not finish:
                 continue
 
-            # Fach / Raum / Lehrer
             subjects = resolve_subject_names(session, l)
             subject_name = subjects[0] if subjects else "Unterricht"
 
@@ -210,14 +240,10 @@ def main():
             teachers_list = resolve_teacher_names(session, l)
             teachers = _safe_join(teachers_list)
 
-            # Status (Entfall / Vertretung / Prüfung)
             prefix, extra_note = lesson_status(l)
-
-            # Titel
             title_core = subject_name + (f" · {room}" if room else "")
             title = f"{prefix}: {title_core}" if prefix else title_core
 
-            # Event
             e = Event()
             e.name = title
             e.begin = begin
@@ -234,14 +260,32 @@ def main():
             code_val = getattr(l, "code", None)
             if code_val:
                 notes.append(f"Code: {code_val}")
+
+            # Hausaufgaben für Fach + Datum hinzufügen
+            hw_notes = []
+            try:
+                raw_su = (getattr(l, "_data", {}) or {}).get("su", []) or []
+                subj_ids = [int(x.get("id")) for x in raw_su if isinstance(x, dict) and x.get("id") is not None]
+                due_dates = [begin.date().isoformat(), finish.date().isoformat()]
+                for due in due_dates:
+                    for sid in subj_ids:
+                        for hw in homeworks.get((due, sid), []):
+                            hw_notes.append(f"Hausaufgabe (fällig {due}): {hw}")
+            except Exception:
+                pass
+            if hw_notes:
+                notes.extend(hw_notes)
+
             if notes:
                 e.description = "\n".join(notes)
 
             e.uid = f"{begin.isoformat()}|{subject_name}|{room}|{teachers}"
-
             if prefix == "Entfall":
                 e.status = "CANCELLED"
 
+            if e.uid in seen_uids:
+                continue
+            seen_uids.add(e.uid)
             cal.events.add(e)
 
         with open(out_path, "w", encoding="utf-8") as f:

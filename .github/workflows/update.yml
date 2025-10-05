@@ -36,8 +36,9 @@ jobs:
           echo "ICS_OUTPUT_PATH=./docs/untis.ics" >> .env
           echo "ICAL_USE_CALDAV=false" >> .env
 
-      - name: Build ICS
-        run: python untis_to_ics.py
+      - name: Test REST
+  run: python test_rest_endpoints.py
+
 
       - name: Commit and push ICS
         run: |

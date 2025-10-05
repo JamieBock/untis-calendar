@@ -1,8 +1,7 @@
-import re
 import os
 import sys
 import pytz
-import requests
+import re
 import webuntis
 from datetime import datetime, timedelta
 from ics import Calendar, Event
@@ -149,53 +148,57 @@ def resolve_room_names(session, lesson):
     except Exception:
         return []
 
-# -------------------- Status / Prüfungen --------------------
+# -------------------- Text-Erkennung: Prüfungen / Hausaufgaben --------------------
+EXAM_KEYWORDS = ["prüfung", "klausur", "ex", "exam", "arbeit", "test", "leistungskontrolle"]
+HOMEWORK_LINE = re.compile(r'\b(hausaufgabe|ha\b|aufgabe|vokabeln|übung|uebung)\b[:\-]?\s*(.*)', re.IGNORECASE)
+
+def extract_info_text(lesson):
+    parts = []
+    for key in ("substText", "info"):
+        val = getattr(lesson, key, None)
+        if isinstance(val, str) and val.strip():
+            parts.append(val.strip())
+    raw = getattr(lesson, "_data", {}) or {}
+    for key in ("txt", "lsnote", "notice"):
+        val = raw.get(key)
+        if isinstance(val, str) and val.strip():
+            parts.append(val.strip())
+    return "\n".join(parts)
+
+def find_homework_lines(info_text):
+    if not info_text:
+        return []
+    lines = []
+    for line in info_text.splitlines():
+        m = HOMEWORK_LINE.search(line)
+        if m:
+            rest = (m.group(2) or "").strip()
+            lines.append(rest if rest else line.strip())
+    return lines
+
+def detect_exam_from_text(info_text):
+    if not info_text:
+        return False
+    low = info_text.lower()
+    return any(k in low for k in EXAM_KEYWORDS)
+
+# -------------------- Status --------------------
 def lesson_status(lesson):
-    code = (getattr(lesson, "code", None) or "").lower()
+    code  = (getattr(lesson, "code", None) or "").lower()
     ltype = (getattr(lesson, "_data", {}).get("lstype") or "").lower()
-    info = (getattr(lesson, "substText", None) or getattr(lesson, "info", None) or "").strip()
+    info_text = extract_info_text(lesson)
 
     is_cancel = getattr(lesson, "is_cancelled", False) or code in {"cancelled", "canc", "absent"}
-    is_subst = code in {"irregular", "subst", "assigned"}
-    is_exam = ("exam" in ltype) or any(k in info.lower() for k in ["prüfung", "klausur", "exam", "arbeit"])
+    is_subst  = code in {"irregular", "subst", "assigned"}
+    is_exam   = ("exam" in ltype) or detect_exam_from_text(info_text)
 
     if is_cancel:
-        return "Entfall", info
+        return "Entfall", info_text
     if is_exam:
-        return "Prüfung", info
+        return "Prüfung", info_text
     if is_subst:
-        return "Vertretung", info
-    return "", info
-
-# -------------------- Hausaufgaben via REST --------------------
-def fetch_homeworks(session, student_id, start, end):
-    try:
-        base = f"https://{get_env('WEBUNTIS_SERVER', required=True)}/WebUntis/api/rest/view/v1/homeworks"
-        params = {
-            "resourceType": "STUDENT",
-            "resourceId": int(student_id),
-            "start": start.isoformat(),
-            "end": end.isoformat(),
-        }
-        rs = getattr(session, "_session", None) or requests.Session()
-        resp = rs.get(base, params=params, timeout=20)
-        resp.raise_for_status()
-        data = resp.json() if resp.content else []
-    except Exception:
-        return {}
-
-    hw = {}
-    for item in data or []:
-        try:
-            due = item.get("dueDate")
-            subj = item.get("subject", {}).get("id")
-            txt = (item.get("text") or "").strip()
-            if due and subj and txt:
-                key = (due, int(subj))
-                hw.setdefault(key, []).append(txt)
-        except Exception:
-            continue
-    return hw
+        return "Vertretung", info_text
+    return "", info_text
 
 # -------------------- MAIN --------------------
 def main():
@@ -213,11 +216,6 @@ def main():
 
         scope = pick_scope(session)
         lessons = fetch_timetable(session, scope, start, end)
-
-        student_id = os.getenv("UNTIS_STUDENT_ID")
-        homeworks = {}
-        if student_id:
-            homeworks = fetch_homeworks(session, int(student_id), start, end)
 
         cal = Calendar()
         seen_uids = set()
@@ -256,26 +254,18 @@ def main():
                 notes.append(f"Lehrkraft: {teachers}")
             if extra_note:
                 notes.append(extra_note)
+
+            # Hausaufgaben aus Textzeilen erkennen
+            hw_notes = find_homework_lines(extra_note)
+            if hw_notes:
+                for t in hw_notes:
+                    notes.append(f"Hausaufgabe: {t}")
+
             if getattr(l, "substText", None) and getattr(l, "substText") not in notes:
                 notes.append(f"Hinweis: {l.substText}")
             code_val = getattr(l, "code", None)
             if code_val:
                 notes.append(f"Code: {code_val}")
-
-            # Hausaufgaben für Fach + Datum hinzufügen
-            hw_notes = []
-            try:
-                raw_su = (getattr(l, "_data", {}) or {}).get("su", []) or []
-                subj_ids = [int(x.get("id")) for x in raw_su if isinstance(x, dict) and x.get("id") is not None]
-                due_dates = [begin.date().isoformat(), finish.date().isoformat()]
-                for due in due_dates:
-                    for sid in subj_ids:
-                        for hw in homeworks.get((due, sid), []):
-                            hw_notes.append(f"Hausaufgabe (fällig {due}): {hw}")
-            except Exception:
-                pass
-            if hw_notes:
-                notes.extend(hw_notes)
 
             if notes:
                 e.description = "\n".join(notes)

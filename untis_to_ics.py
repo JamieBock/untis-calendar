@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 from ics import Calendar, Event
 from dotenv import load_dotenv
 
+# -------------------- env helpers --------------------
 def get_env(name, default=None, required=False):
     v = os.getenv(name, default)
     if required and not v:
@@ -13,6 +14,7 @@ def get_env(name, default=None, required=False):
         sys.exit(2)
     return v
 
+# -------------------- untis session --------------------
 def login_session():
     s = webuntis.Session(
         server=get_env("WEBUNTIS_SERVER", required=True),
@@ -24,7 +26,7 @@ def login_session():
     return s.login()
 
 def pick_scope(session):
-    # 1) IDs aus ENV (empfohlen bei neuem Perseus-Frontend / SSO)
+    # IDs aus ENV (empfohlen bei neuem perseus-Frontend / SSO)
     sid = os.getenv("UNTIS_STUDENT_ID")
     tid = os.getenv("UNTIS_TEACHER_ID")
     cid = os.getenv("UNTIS_CLASS_ID")
@@ -34,19 +36,17 @@ def pick_scope(session):
         return {"teacherId": int(tid)}
     if cid:
         return {"classId": int(cid)}
-
-    # 2) Fallback: current user (funktioniert bei klassischem Login)
+    # Fallback (klassischer Login)
     try:
         me = session.get_current_user()
         if me and hasattr(me, "personType") and me.personType and me.personId:
             return {"personType": me.personType, "personId": me.personId}
     except Exception:
         pass
-
-    raise RuntimeError("Konnte keinen Scope bestimmen (weder ENV-IDs noch get_current_user()).")
+    raise RuntimeError("Konnte keinen Scope bestimmen (ENV-IDs setzen).")
 
 def fetch_timetable(session, scope, start, end):
-    # webuntis 0.1.x erwartet 'student' / 'klasse' / 'teacher' als Keyword
+    # webuntis 0.1.x erwartet student/klasse/teacher als Keyword
     kw = {"start": start, "end": end}
     if "studentId" in scope:
         kw["student"] = int(scope["studentId"])
@@ -65,26 +65,57 @@ def fetch_timetable(session, scope, start, end):
         raise RuntimeError("Unbekannter Scope für timetable().")
     return session.timetable(**kw)
 
+# -------------------- resolvers (robust) --------------------
 def _safe_join(items):
     return ", ".join([x for x in items if x]) if items else ""
 
 def resolve_subject_names(session, lesson):
-    # 0.1.x: lesson._data["su"] ist Liste mit Subject-IDs
     try:
-        su = getattr(lesson, "_data", {}).get("su", [])
-        if not su:
-            # fallback: einzelne subject-Attr
-            s = getattr(lesson, "subject", None)
-            name = getattr(s, "long_name", None) or getattr(s, "name", None)
-            return [name] if name else []
-        ids = [x.get("id") for x in su if isinstance(x, dict)]
+        data = getattr(lesson, "_data", {}) or {}
+        su = data.get("su", [])
         names = []
-        if ids:
-            # session.subjects().filter(id=ID) → 1 Element
-            for sid in ids:
+        # IDs aus raw-Daten
+        for x in su:
+            try:
+                sid = x.get("id")
+                if sid is None:
+                    continue
+                subj = session.subjects().filter(id=sid)[0]
+                nm = getattr(subj, "long_name", None) or getattr(subj, "name", None)
+                if nm:
+                    names.append(nm)
+            except Exception:
+                continue
+        # Fallback high-level
+        if not names:
+            s = getattr(lesson, "subject", None)
+            nm = getattr(s, "long_name", None) or getattr(s, "name", None)
+            if nm:
+                names.append(nm)
+        return names
+    except Exception:
+        return []
+
+def resolve_teacher_names(session, lesson):
+    try:
+        data = getattr(lesson, "_data", {}) or {}
+        te = data.get("te", [])
+        names = []
+        for x in te:
+            try:
+                tid = x.get("id")
+                if tid is None:
+                    continue
+                t = session.teachers().filter(id=tid)[0]
+                nm = getattr(t, "long_name", None) or getattr(t, "name", None)
+                if nm:
+                    names.append(nm)
+            except Exception:
+                continue
+        if not names:
+            for t in getattr(lesson, "teachers", []) or []:
                 try:
-                    subj = session.subjects().filter(id=sid)[0]
-                    nm = getattr(subj, "long_name", None) or getattr(subj, "name", None)
+                    nm = getattr(t, "long_name", None) or getattr(t, "name", None)
                     if nm:
                         names.append(nm)
                 except Exception:
@@ -93,70 +124,39 @@ def resolve_subject_names(session, lesson):
     except Exception:
         return []
 
-def resolve_teacher_names(session, lesson):
-    try:
-        te = getattr(lesson, "_data", {}).get("te", [])
-        ids = [x.get("id") for x in te if isinstance(x, dict)]
-        tnames = []
-        if ids:
-            for tid in ids:
-                try:
-                    t = session.teachers().filter(id=tid)[0]
-                    nm = getattr(t, "long_name", None) or getattr(t, "name", None)
-                    if nm:
-                        tnames.append(nm)
-                except Exception:
-                    continue
-        # Fallback: high-level API
-        if not tnames:
-            for t in getattr(lesson, "teachers", []) or []:
-                try:
-                    nm = getattr(t, "long_name", None) or getattr(t, "name", None)
-                    if nm:
-                        tnames.append(nm)
-                except Exception:
-                    continue
-        return tnames
-    except Exception:
-        return []
-
 def resolve_room_names(session, lesson):
     try:
-        ro = getattr(lesson, "_data", {}).get("ro", [])
-        ids = [x.get("id") for x in ro if isinstance(x, dict)]
-        rnames = []
-        if ids:
-            for rid in ids:
-                try:
-                    r = session.rooms().filter(id=rid)[0]
-                    nm = getattr(r, "name", None) or getattr(r, "long_name", None)
-                    if nm:
-                        rnames.append(nm)
-                except Exception:
+        data = getattr(lesson, "_data", {}) or {}
+        ro = data.get("ro", [])
+        names = []
+        for x in ro:
+            try:
+                rid = x.get("id")
+                if rid is None:
                     continue
-        if not rnames:
+                r = session.rooms().filter(id=rid)[0]
+                nm = getattr(r, "name", None) or getattr(r, "long_name", None)
+                if nm:
+                    names.append(nm)
+            except Exception:
+                continue
+        if not names:
             for r in getattr(lesson, "rooms", []) or []:
                 try:
                     nm = getattr(r, "name", None) or getattr(r, "long_name", None)
                     if nm:
-                        rnames.append(nm)
+                        names.append(nm)
                 except Exception:
                     continue
-        return rnames
+        return names
     except Exception:
         return []
 
 def lesson_status(lesson):
-    """
-    Liefert ('prefix', 'notes_extra') basierend auf Lesson-Feldern.
-    """
-    # 0.1.x hat oft 'code' und 'statflags' / 'lstype'
     code = (getattr(lesson, "code", None) or "").lower()
     ltype = (getattr(lesson, "_data", {}).get("lstype") or "").lower()
     info = getattr(lesson, "substText", None) or getattr(lesson, "info", None) or ""
-    notes = []
     prefix = ""
-
     # Entfall
     if getattr(lesson, "is_cancelled", False) or code in {"cancelled", "canc", "absent"}:
         prefix = "Entfall"
@@ -164,15 +164,12 @@ def lesson_status(lesson):
     elif code in {"irregular", "subst", "assigned"}:
         prefix = "Vertretung"
     # Prüfung
-    if "exam" in ltype or "prüfung" in info.lower() or "klausur" in info.lower() or "exam" in info.lower():
-        prefix = "Prüfung" if not prefix else prefix  # Prüfung hat Priorität nur wenn kein Entfall
+    if ("exam" in ltype) or any(k in info.lower() for k in ["prüfung", "klausur", "exam"]):
+        if not prefix:
+            prefix = "Prüfung"
+    return prefix, info.strip()
 
-    if info:
-        notes.append(info)
-
-    return prefix, _safe_join(notes)
-
-
+# -------------------- main --------------------
 def main():
     load_dotenv()
     tzname = get_env("TIMEZONE", "Europe/Berlin")
@@ -200,55 +197,51 @@ def main():
                 begin = getattr(l, "start", None)
                 finish = getattr(l, "end", None)
             if not begin or not finish:
-                continue  # ohne Zeiten kein Termin
+                continue
 
-            # Fach / Raum / Lehrer robust auflösen
-subjects = resolve_subject_names(session, l)
-subject_name = subjects[0] if subjects else "Unterricht"
+            # Fach / Raum / Lehrer
+            subjects = resolve_subject_names(session, l)
+            subject_name = subjects[0] if subjects else "Unterricht"
 
-rooms = resolve_room_names(session, l)
-room = _safe_join(rooms)
+            rooms = resolve_room_names(session, l)
+            room = _safe_join(rooms)
 
-teachers_list = resolve_teacher_names(session, l)
-teachers = _safe_join(teachers_list)
+            teachers_list = resolve_teacher_names(session, l)
+            teachers = _safe_join(teachers_list)
 
-# Status bestimmen (Prüfung, Vertretung, Entfall)
-prefix, extra_note = lesson_status(l)
+            # Status (Entfall / Vertretung / Prüfung)
+            prefix, extra_note = lesson_status(l)
 
-# Titel
-title_core = subject_name + (f" · {room}" if room else "")
-title = f"{prefix}: {title_core}" if prefix else title_core
+            # Titel
+            title_core = subject_name + (f" · {room}" if room else "")
+            title = f"{prefix}: {title_core}" if prefix else title_core
 
-# 🧱 Ereignis erstellen
-e = Event()
-e.name = title
-e.begin = begin
-e.end = finish
-e.location = room or None
+            # Event
+            e = Event()
+            e.name = title
+            e.begin = begin
+            e.end = finish
+            e.location = room or None
 
-# Beschreibung (Description im Kalender)
-notes = []
-if teachers:
-    notes.append(f"Lehrkraft: {teachers}")
-if extra_note:
-    notes.append(extra_note)
-if getattr(l, "substText", None) and getattr(l, "substText") not in notes:
-    notes.append(f"Hinweis: {l.substText}")
-code_val = getattr(l, "code", None)
-if code_val:
-    notes.append(f"Code: {code_val}")
-if notes:
-    e.description = "\n".join(notes)
+            notes = []
+            if teachers:
+                notes.append(f"Lehrkraft: {teachers}")
+            if extra_note:
+                notes.append(extra_note)
+            if getattr(l, "substText", None) and getattr(l, "substText") not in notes:
+                notes.append(f"Hinweis: {l.substText}")
+            code_val = getattr(l, "code", None)
+            if code_val:
+                notes.append(f"Code: {code_val}")
+            if notes:
+                e.description = "\n".join(notes)
 
-# stabile UID (damit sich Termine korrekt aktualisieren)
-e.uid = f"{begin.isoformat()}|{subject_name}|{room}|{teachers}"
+            e.uid = f"{begin.isoformat()}|{subject_name}|{room}|{teachers}"
 
-# Entfall explizit kennzeichnen
-if prefix == "Entfall":
-    e.status = "CANCELLED"
+            if prefix == "Entfall":
+                e.status = "CANCELLED"
 
-cal.events.add(e)
-
+            cal.events.add(e)
 
         with open(out_path, "w", encoding="utf-8") as f:
             f.writelines(cal.serialize_iter())

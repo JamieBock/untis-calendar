@@ -24,8 +24,8 @@ def login_session():
         username=get_env("WEBUNTIS_USERNAME", required=True),
         password=get_env("WEBUNTIS_PASSWORD", required=True),
         useragent=get_env("WEBUNTIS_CLIENT", "untis-cal-sync"),
-        )
-        return s.login()
+    )
+    return s.login()
 
 
 def pick_scope(session):

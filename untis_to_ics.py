@@ -93,9 +93,52 @@ def main():
                 finish = l.end
 
             subject = getattr(l, "subject", None)
-            subject_name = getattr(subject, "long_name", None) or getattr(subject, "name", None) or "Unterricht"
-            room = ", ".join(r.name for r in getattr(l, "rooms", []) if hasattr(r, "name")) or ""
-            teachers = ", ".join((getattr(t, "long_name", None) or getattr(t, "name", "")) for t in getattr(l, "teachers", []) if hasattr(t, "name"))
+            # Fach
+subject_name = "Unterricht"
+try:
+    subject = getattr(l, "subject", None)
+    subject_name = (
+        getattr(subject, "long_name", None)
+        or getattr(subject, "name", None)
+        or "Unterricht"
+    )
+except Exception:
+    pass
+
+# Räume (defensiv)
+room = ""
+try:
+    rs = getattr(l, "rooms", None)
+    if rs:
+        rnames = []
+        for r in rs:
+            try:
+                nm = getattr(r, "name", None) or getattr(r, "long_name", None)
+                if nm:
+                    rnames.append(nm)
+            except Exception:
+                continue
+        room = ", ".join(rnames)
+except Exception:
+    room = ""
+
+# Lehrkräfte (defensiv)
+teachers = ""
+try:
+    ts = getattr(l, "teachers", None)
+    if ts:
+        tnames = []
+        for t in ts:
+            try:
+                nm = getattr(t, "long_name", None) or getattr(t, "name", None)
+                if nm:
+                    tnames.append(nm)
+            except Exception:
+                continue
+        teachers = ", ".join(tnames)
+except Exception:
+    teachers = ""
+
 
             title = subject_name + (f" · {room}" if room else "")
 

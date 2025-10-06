@@ -191,22 +191,26 @@ def main():
                 continue
             by_day.setdefault(begin.date(), []).append((begin, finish))
 
-        # Erstelle zusammengefasste Schulblöcke (Titel inkl. Uhrzeit, UID stabil)
-        for day, intervals in sorted(by_day.items()):
-            blocks = merge_into_blocks(intervals, max_gap_min=15)
-            for b, e in blocks:
-                ev = Event()
-                # Titel mit Uhrzeit
-                ev.name = f"Schule {b.strftime('%H:%M')}–{e.strftime('%H:%M')}"
-                ev.begin = b
-                ev.end = e
-                # stabile UID
-                uid = f"BLOCK|{b.astimezone(pytz.UTC).isoformat()}|{e.astimezone(pytz.UTC).isoformat()}"
-                ev.uid = uid
-                if uid in seen_uids:
-                    continue
-                seen_uids.add(uid)
-                cal.events.add(ev)
+        # Erstelle zusammengefasste Schulblöcke (Titel inkl. Uhrzeit, stabile UID)
+for day, intervals in sorted(by_day.items()):
+    blocks = merge_into_blocks(intervals, max_gap_min=15)
+    for b, e in blocks:
+        ev = Event()
+        # Titel mit Uhrzeit (lokal)
+        ev.name = f"Schule {b.strftime('%H:%M')}–{e.strftime('%H:%M')}"
+        ev.begin = b
+        ev.end = e
+
+        # stabile UID im iCal-Format (UTC, email-like)
+        b_utc = b.astimezone(pytz.UTC).strftime("%Y%m%dT%H%M%SZ")
+        e_utc = e.astimezone(pytz.UTC).strftime("%Y%m%dT%H%M%SZ")
+        uid = f"{b_utc}-{e_utc}@untis-jamie"
+        ev.uid = uid
+
+        if uid in seen_uids:
+            continue
+        seen_uids.add(uid)
+        cal.events.add(ev)
 
         # Hausaufgaben & Prüfungen als eigene Termine
         created_hw, created_exam = set(), set()

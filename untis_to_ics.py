@@ -57,8 +57,16 @@ def fetch_timetable(session, scope, start, end):
     return session.timetable(**kw)
 
 # ==================== HA-/Prüfungs-Erkennung (Text) ====================
-EXAM_KEYWORDS = ["prüfung", "klausur", "arbeit", "test", "leistungskontrolle", "ex", "exam", "ka", "lk"]
-HOMEWORK_HINTS = ["hausaufgabe", "ha", "aufgabe", "vokabel", "übung", "uebung", "arbeitsblatt", "abgabe"]
+EXAM_KEYWORDS = [
+    "prüfung", "klausur", "arbeit", "test", "leistungskontrolle", "ex", "exam", "ka", "lk",
+    "vokabeltest", "klassenarbeit", "prüf."
+]
+# Deutsch + Englisch + typische Abkürzungen
+HOMEWORK_HINTS = [
+    "hausaufgabe", "hausaufgaben", "ha", "aufgabe", "aufgaben", "vokabel", "übung", "uebung",
+    "arbeitsblatt", "abgabe", "bis ",
+    "homework", "assignment", "due", "reading", "worksheet", "essay", "vocab", "wb", "tb"
+]
 
 WEEKDAYS_DE = {"montag":0,"dienstag":1,"mittwoch":2,"donnerstag":3,"freitag":4,"samstag":5,"sonntag":6}
 DATE_DDMMYYYY = re.compile(r"\b(\d{1,2})\.(\d{1,2})\.(\d{4})\b")
@@ -98,12 +106,13 @@ def parse_due_date(text: str, base_day: date):
             if cand < base_day: cand = date(base_day.year+1, mth, d)
             return cand
         except Exception: pass
+    # englische due-Formate wie "due 10.10." werden über obige Muster schon erfasst
     return None
 
 def contains_homework(text: str) -> bool:
     if not text: return False
     low = text.lower()
-    return any(h in low for h in HOMEWORK_HINTS) or "bis " in low
+    return any(h in low for h in HOMEWORK_HINTS)
 
 def detect_exam(text: str) -> bool:
     if not text: return False
@@ -135,7 +144,7 @@ def get_subject_names(session, lesson):
 def next_subject_day(subject: str, lessons, session, tz, base_day: date):
     subj_low = subject.lower()
     best = None
-    horizon = base_day + timedelta(days=21)
+    horizon = base_day + timedelta(days=35)
     for l in lessons:
         try: b = tz.localize(l.start)
         except Exception: b = getattr(l, "start", None)
@@ -147,26 +156,17 @@ def next_subject_day(subject: str, lessons, session, tz, base_day: date):
             if best is None or d < best: best = d
     return best or (base_day + timedelta(days=1))
 
-# ==================== Hausaufgaben via Modul (wenn vorhanden) ====================
+# ==================== Hausaufgaben via Modul (falls vorhanden) ====================
 def fetch_homeworks(session, scope, start, end):
-    """
-    Versucht mehrere Varianten, je nach WebUntis/Library-Version:
-    - session.homeworks(...)
-    - session.get_homeworks(...)        (manche Versionen)
-    - Fällt still zurück, wenn nicht verfügbar.
-    Rückgabe: Liste Dicts mit keys: text, due(date), subjectIds
-    """
+    """Versucht mehrere Varianten; fällt still zurück, wenn Modul nicht verfügbar."""
     try:
         kw = {"start": start, "end": end}
         if "studentId" in scope: kw["student"] = int(scope["studentId"])
         elif "personType" in scope and int(scope["personType"]) == 5:
             kw["student"] = int(scope["personId"])
-
-        # Variante A
         if hasattr(session, "homeworks"):
             res = session.homeworks(**kw)
             if res: return res
-        # Variante B
         if hasattr(session, "get_homeworks"):
             res = session.get_homeworks(**kw)
             if res: return res
@@ -179,8 +179,7 @@ def subjects_lookup(session):
     try:
         for s in session.subjects():
             sid = getattr(s, "id", None)
-            if sid:
-                d[int(sid)] = getattr(s, "long_name", None) or getattr(s, "name", None)
+            if sid: d[int(sid)] = getattr(s, "long_name", None) or getattr(s, "name", None)
     except Exception:
         pass
     return d
@@ -212,7 +211,7 @@ def main():
     session = login_session()
     try:
         start = datetime.now(tz).date()
-        end   = (datetime.now(tz) + timedelta(days=21)).date()  # 3 Wochen -> HA-Fallback möglich
+        end   = (datetime.now(tz) + timedelta(days=35)).date()  # 5 Wochen
         scope = pick_scope(session)
         lessons = fetch_timetable(session, scope, start, end)
 
@@ -252,12 +251,10 @@ def main():
         # ---------- 3a) Hausaufgaben aus Modul (falls vorhanden) ----------
         subj_map = subjects_lookup(session)
         hw_entries = fetch_homeworks(session, scope, start, end)
+        hw_count_mod = 0
         for hw in hw_entries:
-            # Versuche Felder robust zu lesen
             txt = (hw.get("text") or hw.get("description") or "").strip()
-            if not txt:
-                continue
-            # due / dueDate / date (verschiedene Varianten)
+            if not txt: continue
             due = None
             for k in ("due", "dueDate", "date"):
                 v = hw.get(k)
@@ -265,18 +262,15 @@ def main():
                     due = v.date() if isinstance(v, datetime) else v
                     break
                 if isinstance(v, str):
-                    # 2025-10-08 oder 08.10.2025
                     try:
                         if "-" in v:
                             due = datetime.fromisoformat(v).date()
                         else:
                             m = DATE_DDMMYYYY.search(v)
                             if m:
-                                d, mth, y = map(int, m.groups())
-                                due = date(y, mth, d)
+                                d, mth, y = map(int, m.groups()); due = date(y, mth, d)
                     except Exception:
                         pass
-            # Fachname
             subj = None
             for k in ("subjectIds", "subjectId", "subject"):
                 if k in hw:
@@ -288,8 +282,6 @@ def main():
                     elif isinstance(val, str) and not subj:
                         subj = val
             if not subj: subj = "Fach"
-
-            # Fallback Datum, falls nicht geliefert: nächster Unterrichtstag
             if not due:
                 base = start
                 due = next_subject_day(subj, lessons, session, tz, base)
@@ -303,9 +295,11 @@ def main():
             ev.description = txt
             ev.uid = f"HW|{due.isoformat()}|{subj}|{abs(hash(txt))}"
             cal.events.add(ev)
+            hw_count_mod += 1
 
         # ---------- 3b) HA/Prüfungen aus Stunden-Notizen (Fallback) ----------
         created_hw, created_exam = set(), set()
+        hw_count_txt, ex_count = 0, 0
         for l in lessons:
             try: begin = tz.localize(l.start)
             except Exception: begin = getattr(l, "start", None)
@@ -315,7 +309,7 @@ def main():
             subjects = get_subject_names(session, l)
             subject = subjects[0] if subjects else "Fach"
 
-            # Hausaufgabe
+            # Hausaufgabe (Text)
             if contains_homework(info):
                 due = parse_due_date(info, base_day) or next_subject_day(subject, lessons, session, tz, base_day)
                 key = (due.isoformat(), subject, info)
@@ -330,6 +324,7 @@ def main():
                     ev.description = info
                     ev.uid = f"HW|{due.isoformat()}|{subject}|{abs(hash(info))}"
                     cal.events.add(ev)
+                    hw_count_txt += 1
 
             # Prüfung
             if detect_exam(info):
@@ -346,11 +341,13 @@ def main():
                     ev.description = info
                     ev.uid = f"EXAM|{due.isoformat()}|{subject}"
                     cal.events.add(ev)
+                    ex_count += 1
 
-        # ---------- 4) Schreiben ----------
+        # ---------- 4) Schreiben + kurze Logs ----------
         with open(out_path, "w", encoding="utf-8") as f:
             f.writelines(cal.serialize_iter())
         print(f"ICS geschrieben: {out_path}")
+        print(f"Hausaufgaben (Modul): {hw_count_mod}, Hausaufgaben (Text-Fallback): {hw_count_txt}, Prüfungen: {ex_count}")
 
     finally:
         try: session.logout()

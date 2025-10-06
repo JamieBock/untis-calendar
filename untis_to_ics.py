@@ -1,19 +1,22 @@
 import os
 import sys
-import pytz
 import re
-import webuntis
 from datetime import datetime, timedelta, time, date
+
+import pytz
+import webuntis
 from ics import Calendar, Event
 from dotenv import load_dotenv
 
+
 # ==================== ENV HELPERS ====================
-def get_env(name, default=None, required=False):
+def get_env(name: str, default=None, required: bool = False):
     v = os.getenv(name, default)
     if required and not v:
         print(f"Missing env: {name}", file=sys.stderr)
         sys.exit(2)
     return v
+
 
 # ==================== UNTIS LOGIN ====================
 def login_session():
@@ -26,6 +29,7 @@ def login_session():
     )
     return s.login()
 
+
 def pick_scope(session):
     sid = os.getenv("UNTIS_STUDENT_ID")
     tid = os.getenv("UNTIS_TEACHER_ID")
@@ -36,13 +40,15 @@ def pick_scope(session):
         return {"teacherId": int(tid)}
     if cid:
         return {"classId": int(cid)}
+    # Fallback: aktueller Nutzer
     try:
         me = session.get_current_user()
-        if me and hasattr(me, "personType") and me.personType and me.personId:
+        if me and getattr(me, "personType", None) and getattr(me, "personId", None):
             return {"personType": me.personType, "personId": me.personId}
     except Exception:
         pass
     raise RuntimeError("Konnte keinen Scope bestimmen (ENV-IDs setzen).")
+
 
 def fetch_timetable(session, scope, start, end):
     kw = {"start": start, "end": end}
@@ -63,9 +69,15 @@ def fetch_timetable(session, scope, start, end):
         raise RuntimeError("Unbekannter Scope für timetable().")
     return session.timetable(**kw)
 
+
 # ==================== TEXT-/HA-ERKENNUNG ====================
-EXAM_KEYWORDS = ["prüfung", "klausur", "ex", "exam", "arbeit", "test", "leistungskontrolle", "ka", "lk"]
-HOMEWORK_LINE = re.compile(r'\b(hausaufgabe|ha\b|aufgabe|vokabeln|übung|uebung)\b[:\-]?\s*(.*)', re.IGNORECASE)
+EXAM_KEYWORDS = [
+    "prüfung", "klausur", "ex", "exam", "arbeit", "test", "leistungskontrolle", "ka", "lk"
+]
+HOMEWORK_LINE = re.compile(
+    r'\b(hausaufgabe|ha\b|aufgabe|vokabeln|übung|uebung)\b[:\-]?\s*(.*)',
+    re.IGNORECASE,
+)
 
 WEEKDAYS_DE = {
     "montag": 0, "dienstag": 1, "mittwoch": 2, "donnerstag": 3,
@@ -75,7 +87,8 @@ WEEKDAYS_DE = {
 DATE_DDMMYYYY = re.compile(r"\b(\d{1,2})\.(\d{1,2})\.(\d{4})\b")
 DATE_DDMM = re.compile(r"\b(\d{1,2})\.(\d{1,2})\b")
 
-def extract_info_text(lesson):
+
+def extract_info_text(lesson) -> str:
     parts = []
     for key in ("substText", "info"):
         val = getattr(lesson, key, None)
@@ -88,7 +101,8 @@ def extract_info_text(lesson):
             parts.append(val.strip())
     return "\n".join(parts)
 
-def parse_due_date(text, base_day: date):
+
+def parse_due_date(text: str, base_day: date):
     if not text:
         return None
     t = text.lower()
@@ -120,10 +134,11 @@ def parse_due_date(text, base_day: date):
             pass
     return None
 
-def find_homework_items(info_text):
-    results = []
+
+def find_homework_items(info_text: str):
     if not info_text:
-        return results
+        return []
+    results = []
     for line in info_text.splitlines():
         m = HOMEWORK_LINE.search(line)
         if m:
@@ -131,15 +146,17 @@ def find_homework_items(info_text):
             results.append(text_part)
     return results
 
-def detect_exam_from_text(info_text):
+
+def detect_exam_from_text(info_text: str) -> bool:
     if not info_text:
         return False
     low = info_text.lower()
     return any(k in low for k in EXAM_KEYWORDS)
 
+
 # ==================== BLOCK-MERGE ====================
 def merge_into_blocks(intervals, max_gap_min=15):
-    """Fasst Unterrichtsblöcke zusammen, wenn Lücke <= max_gap_min."""
+    """Fasst Unterrichtsintervalle zusammen, wenn die Lücke <= max_gap_min ist."""
     if not intervals:
         return []
     intervals = sorted(intervals, key=lambda x: x[0])
@@ -154,6 +171,7 @@ def merge_into_blocks(intervals, max_gap_min=15):
             merged.append([b, e])
     return [(b, e) for b, e in merged]
 
+
 # ==================== MAIN ====================
 def main():
     load_dotenv()
@@ -165,7 +183,7 @@ def main():
     HW_TIME = time(17, 0)
     session = login_session()
 
-        try:
+    try:
         start = datetime.now(tz).date()
         end = (datetime.now(tz) + timedelta(days=14)).date()
         scope = pick_scope(session)
@@ -174,13 +192,24 @@ def main():
         cal = Calendar()
         seen_uids = set()
 
-        # Gruppiere Unterricht pro Tag (nur nicht-cancelled)
+        # 1) Unterricht pro Tag sammeln (nur nicht-cancelled)
         by_day = {}
         for l in lessons:
-            ...
+            try:
+                begin = tz.localize(l.start)
+                finish = tz.localize(l.end)
+            except Exception:
+                begin = getattr(l, "start", None)
+                finish = getattr(l, "end", None)
+            if not begin or not finish:
+                continue
+            code = (getattr(l, "code", None) or "").lower()
+            is_cancel = getattr(l, "is_cancelled", False) or code in {"cancelled", "canc", "absent"}
+            if is_cancel:
+                continue
             by_day.setdefault(begin.date(), []).append((begin, finish))
 
-        # Erstelle zusammengefasste Schulblöcke (Titel inkl. Uhrzeit, stabile UID)
+        # 2) Zusammengefasste Schulblöcke erstellen (Titel inkl. Uhrzeit, stabile UID)
         for day, intervals in sorted(by_day.items()):
             blocks = merge_into_blocks(intervals, max_gap_min=15)
             for b, e in blocks:
@@ -192,11 +221,12 @@ def main():
                 e_utc = e.astimezone(pytz.UTC).strftime("%Y%m%dT%H%M%SZ")
                 uid = f"{b_utc}-{e_utc}@untis-jamie"
                 ev.uid = uid
-                if uid not in seen_uids:
-                    seen_uids.add(uid)
-                    cal.events.add(ev)
+                if uid in seen_uids:
+                    continue
+                seen_uids.add(uid)
+                cal.events.add(ev)
 
-        # Hausaufgaben & Prüfungen als eigene Termine
+        # 3) Hausaufgaben & Prüfungen als eigene Termine
         created_hw, created_exam = set(), set()
         for l in lessons:
             try:
@@ -208,8 +238,8 @@ def main():
             base_day = begin.date()
             info_text = extract_info_text(l)
 
-            # Fachname (für Titel)
-            subjects = []
+            # Fachname für Titel (best effort)
+            subject = "Fach"
             try:
                 data = getattr(l, "_data", {}) or {}
                 su = data.get("su", [])
@@ -219,10 +249,10 @@ def main():
                         subj = session.subjects().filter(id=sid)[0]
                         nm = getattr(subj, "long_name", None) or getattr(subj, "name", None)
                         if nm:
-                            subjects.append(nm)
+                            subject = nm
+                            break
             except Exception:
                 pass
-            subject = subjects[0] if subjects else "Fach"
 
             # Hausaufgaben
             for txt in find_homework_items(info_text):
@@ -260,6 +290,7 @@ def main():
                 ev.uid = f"EXAM|{due.isoformat()}|{subject}"
                 cal.events.add(ev)
 
+        # 4) Schreiben
         with open(out_path, "w", encoding="utf-8") as f:
             f.writelines(cal.serialize_iter())
         print(f"ICS geschrieben: {out_path}")
@@ -269,6 +300,7 @@ def main():
             session.logout()
         except Exception:
             pass
+
 
 if __name__ == "__main__":
     main()

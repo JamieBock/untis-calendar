@@ -165,7 +165,7 @@ def main():
     HW_TIME = time(17, 0)
     session = login_session()
 
-    try:
+        try:
         start = datetime.now(tz).date()
         end = (datetime.now(tz) + timedelta(days=14)).date()
         scope = pick_scope(session)
@@ -177,40 +177,24 @@ def main():
         # Gruppiere Unterricht pro Tag (nur nicht-cancelled)
         by_day = {}
         for l in lessons:
-            try:
-                begin = tz.localize(l.start)
-                finish = tz.localize(l.end)
-            except Exception:
-                begin = getattr(l, "start", None)
-                finish = getattr(l, "end", None)
-            if not begin or not finish:
-                continue
-            code = (getattr(l, "code", None) or "").lower()
-            is_cancel = getattr(l, "is_cancelled", False) or code in {"cancelled", "canc", "absent"}
-            if is_cancel:
-                continue
+            ...
             by_day.setdefault(begin.date(), []).append((begin, finish))
 
         # Erstelle zusammengefasste Schulblöcke (Titel inkl. Uhrzeit, stabile UID)
-for day, intervals in sorted(by_day.items()):
-    blocks = merge_into_blocks(intervals, max_gap_min=15)
-    for b, e in blocks:
-        ev = Event()
-        # Titel mit Uhrzeit (lokal)
-        ev.name = f"Schule {b.strftime('%H:%M')}–{e.strftime('%H:%M')}"
-        ev.begin = b
-        ev.end = e
-
-        # stabile UID im iCal-Format (UTC, email-like)
-        b_utc = b.astimezone(pytz.UTC).strftime("%Y%m%dT%H%M%SZ")
-        e_utc = e.astimezone(pytz.UTC).strftime("%Y%m%dT%H%M%SZ")
-        uid = f"{b_utc}-{e_utc}@untis-jamie"
-        ev.uid = uid
-
-        if uid in seen_uids:
-            continue
-        seen_uids.add(uid)
-        cal.events.add(ev)
+        for day, intervals in sorted(by_day.items()):
+            blocks = merge_into_blocks(intervals, max_gap_min=15)
+            for b, e in blocks:
+                ev = Event()
+                ev.name = f"Schule {b.strftime('%H:%M')}–{e.strftime('%H:%M')}"
+                ev.begin = b
+                ev.end = e
+                b_utc = b.astimezone(pytz.UTC).strftime("%Y%m%dT%H%M%SZ")
+                e_utc = e.astimezone(pytz.UTC).strftime("%Y%m%dT%H%M%SZ")
+                uid = f"{b_utc}-{e_utc}@untis-jamie"
+                ev.uid = uid
+                if uid not in seen_uids:
+                    seen_uids.add(uid)
+                    cal.events.add(ev)
 
         # Hausaufgaben & Prüfungen als eigene Termine
         created_hw, created_exam = set(), set()

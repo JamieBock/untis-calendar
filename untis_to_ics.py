@@ -64,7 +64,7 @@ def fetch_timetable(session, scope, start, end):
     return session.timetable(**kw)
 
 # ==================== TEXT-/HA-ERKENNUNG ====================
-EXAM_KEYWORDS = ["prüfung", "klausur", "ex", "exam", "arbeit", "test", "leistungskontrolle"]
+EXAM_KEYWORDS = ["prüfung", "klausur", "ex", "exam", "arbeit", "test", "leistungskontrolle", "ka", "lk"]
 HOMEWORK_LINE = re.compile(r'\b(hausaufgabe|ha\b|aufgabe|vokabeln|übung|uebung)\b[:\-]?\s*(.*)', re.IGNORECASE)
 
 WEEKDAYS_DE = {
@@ -174,7 +174,7 @@ def main():
         cal = Calendar()
         seen_uids = set()
 
-        # Gruppiere Unterricht pro Tag
+        # Gruppiere Unterricht pro Tag (nur nicht-cancelled)
         by_day = {}
         for l in lessons:
             try:
@@ -191,20 +191,24 @@ def main():
                 continue
             by_day.setdefault(begin.date(), []).append((begin, finish))
 
-        # Erstelle zusammengefasste Schulblöcke
+        # Erstelle zusammengefasste Schulblöcke (Titel inkl. Uhrzeit, UID stabil)
         for day, intervals in sorted(by_day.items()):
             blocks = merge_into_blocks(intervals, max_gap_min=15)
             for b, e in blocks:
                 ev = Event()
-                ev.name = "Schule"
+                # Titel mit Uhrzeit
+                ev.name = f"Schule {b.strftime('%H:%M')}–{e.strftime('%H:%M')}"
                 ev.begin = b
                 ev.end = e
-                uid = f"BLOCK|{b.isoformat()}|{e.isoformat()}"
-                if uid not in seen_uids:
-                    seen_uids.add(uid)
-                    cal.events.add(ev)
+                # stabile UID
+                uid = f"BLOCK|{b.astimezone(pytz.UTC).isoformat()}|{e.astimezone(pytz.UTC).isoformat()}"
+                ev.uid = uid
+                if uid in seen_uids:
+                    continue
+                seen_uids.add(uid)
+                cal.events.add(ev)
 
-        # Hausaufgaben & Prüfungen
+        # Hausaufgaben & Prüfungen als eigene Termine
         created_hw, created_exam = set(), set()
         for l in lessons:
             try:
@@ -215,6 +219,8 @@ def main():
                 continue
             base_day = begin.date()
             info_text = extract_info_text(l)
+
+            # Fachname (für Titel)
             subjects = []
             try:
                 data = getattr(l, "_data", {}) or {}

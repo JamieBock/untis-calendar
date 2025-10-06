@@ -9,7 +9,7 @@ from ics import Calendar, Event
 from dotenv import load_dotenv
 
 
-# ==================== ENV HELPERS ====================
+# ==================== ENV ====================
 def get_env(name: str, default=None, required: bool = False):
     v = os.getenv(name, default)
     if required and not v:
@@ -18,7 +18,7 @@ def get_env(name: str, default=None, required: bool = False):
     return v
 
 
-# ==================== UNTIS LOGIN ====================
+# ==================== Login & Timetable ====================
 def login_session():
     s = webuntis.Session(
         server=get_env("WEBUNTIS_SERVER", required=True),
@@ -40,7 +40,6 @@ def pick_scope(session):
         return {"teacherId": int(tid)}
     if cid:
         return {"classId": int(cid)}
-    # Fallback: aktueller Nutzer
     try:
         me = session.get_current_user()
         if me and getattr(me, "personType", None) and getattr(me, "personId", None):
@@ -70,14 +69,13 @@ def fetch_timetable(session, scope, start, end):
     return session.timetable(**kw)
 
 
-# ==================== TEXT-/HA-ERKENNUNG ====================
+# ==================== Text-/HA-/Prüfungs-Erkennung ====================
 EXAM_KEYWORDS = [
-    "prüfung", "klausur", "ex", "exam", "arbeit", "test", "leistungskontrolle", "ka", "lk"
+    "prüfung", "klausur", "arbeit", "test", "leistungskontrolle", "ex", "exam", "ka", "lk"
 ]
-HOMEWORK_LINE = re.compile(
-    r'\b(hausaufgabe|ha\b|aufgabe|vokabeln|übung|uebung)\b[:\-]?\s*(.*)',
-    re.IGNORECASE,
-)
+HOMEWORK_HINTS = [
+    "hausaufgabe", "ha", "aufgabe", "vokabel", "übung", "uebung", "arbeitsblatt", "abgabe"
+]
 
 WEEKDAYS_DE = {
     "montag": 0, "dienstag": 1, "mittwoch": 2, "donnerstag": 3,
@@ -135,28 +133,72 @@ def parse_due_date(text: str, base_day: date):
     return None
 
 
-def find_homework_items(info_text: str):
-    if not info_text:
-        return []
-    results = []
-    for line in info_text.splitlines():
-        m = HOMEWORK_LINE.search(line)
-        if m:
-            text_part = (m.group(2) or "").strip() or line.strip()
-            results.append(text_part)
-    return results
-
-
-def detect_exam_from_text(info_text: str) -> bool:
-    if not info_text:
+def contains_homework(text: str) -> bool:
+    if not text:
         return False
-    low = info_text.lower()
+    low = text.lower()
+    return any(h in low for h in HOMEWORK_HINTS) or "bis" in low  # „bis …“ wird oft fürs Datum genutzt
+
+
+def detect_exam(text: str) -> bool:
+    if not text:
+        return False
+    low = text.lower()
     return any(k in low for k in EXAM_KEYWORDS)
 
 
-# ==================== BLOCK-MERGE ====================
-def merge_into_blocks(intervals, max_gap_min=15):
-    """Fasst Unterrichtsintervalle zusammen, wenn die Lücke <= max_gap_min ist."""
+# ==================== Fächer/Zuordnung ====================
+def get_subject_names(session, lesson):
+    names = []
+    try:
+        data = getattr(lesson, "_data", {}) or {}
+        for x in data.get("su", []):
+            sid = x.get("id")
+            if not sid:
+                continue
+            try:
+                subj = session.subjects().filter(id=sid)[0]
+                nm = getattr(subj, "long_name", None) or getattr(subj, "name", None)
+                if nm:
+                    names.append(nm)
+            except Exception:
+                continue
+    except Exception:
+        pass
+    if not names:
+        s = getattr(lesson, "subject", None)
+        nm = getattr(s, "long_name", None) or getattr(s, "name", None)
+        if nm:
+            names.append(nm)
+    return names
+
+
+def next_subject_day(subject: str, lessons, session, tz, base_day: date):
+    """Suche den nächsten Unterrichtstag für das Fach (bis +21 Tage)."""
+    subj_low = subject.lower()
+    best = None
+    horizon = base_day + timedelta(days=21)
+    for l in lessons:
+        try:
+            b = pytz.timezone(tz.zone).localize(l.start)
+        except Exception:
+            b = getattr(l, "start", None)
+        if not b:
+            continue
+        d = b.date()
+        if d <= base_day or d > horizon:
+            continue
+        names = get_subject_names(session, l)
+        if any(subj_low == n.lower() for n in names):
+            if best is None or d < best:
+                best = d
+    return best or (base_day + timedelta(days=1))
+
+
+# ==================== Merge-Logik für Schulblöcke ====================
+def merge_into_blocks(intervals, max_gap_min=20):
+    """Fasse Intervalle zusammen, wenn die Lücke <= max_gap_min ist.
+    Nur bei Lücke > max_gap_min wird aufgeteilt."""
     if not intervals:
         return []
     intervals = sorted(intervals, key=lambda x: x[0])
@@ -164,7 +206,7 @@ def merge_into_blocks(intervals, max_gap_min=15):
     merged = [list(intervals[0])]
     for b, e in intervals[1:]:
         last_b, last_e = merged[-1]
-        if b - last_e <= max_gap:
+        if b - last_e <= max_gap:   # <= 20 Min wird zusammengefasst
             if e > last_e:
                 merged[-1][1] = e
         else:
@@ -181,18 +223,18 @@ def main():
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
 
     HW_TIME = time(17, 0)
-    session = login_session()
 
+    session = login_session()
     try:
         start = datetime.now(tz).date()
-        end = (datetime.now(tz) + timedelta(days=14)).date()
+        end = (datetime.now(tz) + timedelta(days=21)).date()  # 3 Wochen, damit HA-Fallback greift
         scope = pick_scope(session)
         lessons = fetch_timetable(session, scope, start, end)
 
         cal = Calendar()
         seen_uids = set()
 
-        # 1) Unterricht pro Tag sammeln (nur nicht-cancelled)
+        # ---------- 1) Unterricht pro Tag sammeln (nur nicht-cancelled) ----------
         by_day = {}
         for l in lessons:
             try:
@@ -206,12 +248,12 @@ def main():
             code = (getattr(l, "code", None) or "").lower()
             is_cancel = getattr(l, "is_cancelled", False) or code in {"cancelled", "canc", "absent"}
             if is_cancel:
-                continue
+                continue  # Entfall wird NICHT zu Unterricht gezählt → erzeugt Lücke
             by_day.setdefault(begin.date(), []).append((begin, finish))
 
-        # 2) Zusammengefasste Schulblöcke erstellen (Titel inkl. Uhrzeit, stabile UID)
+        # ---------- 2) Schulblöcke (Pausen <= 20 Min zusammenfassen) ----------
         for day, intervals in sorted(by_day.items()):
-            blocks = merge_into_blocks(intervals, max_gap_min=15)
+            blocks = merge_into_blocks(intervals, max_gap_min=20)
             for b, e in blocks:
                 ev = Event()
                 ev.name = f"Schule {b.strftime('%H:%M')}–{e.strftime('%H:%M')}"
@@ -219,16 +261,17 @@ def main():
                 ev.end = e
                 b_utc = b.astimezone(pytz.UTC).strftime("%Y%m%dT%H%M%SZ")
                 e_utc = e.astimezone(pytz.UTC).strftime("%Y%m%dT%H%M%SZ")
-                uid = f"{b_utc}-{e_utc}@untis-jamie"
+                uid = f"{b_utc}-{e_utc}@untis-merged"
                 ev.uid = uid
                 if uid in seen_uids:
                     continue
                 seen_uids.add(uid)
                 cal.events.add(ev)
 
-        # 3) Hausaufgaben & Prüfungen als eigene Termine
+        # ---------- 3) Hausaufgaben & Prüfungen ----------
         created_hw, created_exam = set(), set()
         for l in lessons:
+            # Basisdaten
             try:
                 begin = tz.localize(l.start)
             except Exception:
@@ -236,61 +279,47 @@ def main():
             if not begin:
                 continue
             base_day = begin.date()
-            info_text = extract_info_text(l)
+            info = extract_info_text(l).strip()
+            subjects = get_subject_names(session, l)
+            subject = subjects[0] if subjects else "Fach"
 
-            # Fachname für Titel (best effort)
-            subject = "Fach"
-            try:
-                data = getattr(l, "_data", {}) or {}
-                su = data.get("su", [])
-                for x in su:
-                    sid = x.get("id")
-                    if sid:
-                        subj = session.subjects().filter(id=sid)[0]
-                        nm = getattr(subj, "long_name", None) or getattr(subj, "name", None)
-                        if nm:
-                            subject = nm
-                            break
-            except Exception:
-                pass
-
-            # Hausaufgaben
-            for txt in find_homework_items(info_text):
-                due = parse_due_date(txt, base_day) or parse_due_date(info_text, base_day)
+            # --- Hausaufgaben ---
+            if contains_homework(info):
+                # 1) Versuche Fälligkeitsdatum aus Text
+                due = parse_due_date(info, base_day)
+                # 2) Falls nicht im Text: nächster Unterrichtstag dieses Fachs
                 if not due:
-                    continue
-                key = (due.isoformat(), subject, txt)
-                if key in created_hw:
-                    continue
-                created_hw.add(key)
-                hw_begin = tz.localize(datetime.combine(due, HW_TIME))
-                hw_end = hw_begin + timedelta(minutes=30)
-                ev = Event()
-                ev.name = f"{subject} – Hausaufgabe"
-                ev.begin = hw_begin
-                ev.end = hw_end
-                ev.description = txt
-                ev.uid = f"HW|{due.isoformat()}|{subject}|{hash(txt)}"
-                cal.events.add(ev)
+                    due = next_subject_day(subject, lessons, session, tz, base_day)
+                key = (due.isoformat(), subject, info)
+                if key not in created_hw:
+                    created_hw.add(key)
+                    hw_begin = tz.localize(datetime.combine(due, HW_TIME))
+                    hw_end = hw_begin + timedelta(minutes=30)
+                    ev = Event()
+                    ev.name = f"{subject} – Hausaufgabe"
+                    ev.begin = hw_begin
+                    ev.end = hw_end
+                    ev.description = info
+                    ev.uid = f"HW|{due.isoformat()}|{subject}|{abs(hash(info))}"
+                    cal.events.add(ev)
 
-            # Prüfungen
-            if detect_exam_from_text(info_text):
-                due = parse_due_date(info_text, base_day) or base_day
+            # --- Prüfungen ---
+            if detect_exam(info):
+                due = parse_due_date(info, base_day) or base_day
                 key = (due.isoformat(), subject, "exam")
-                if key in created_exam:
-                    continue
-                created_exam.add(key)
-                ex_begin = tz.localize(datetime.combine(due, time(8, 0)))
-                ex_end = ex_begin + timedelta(hours=2)
-                ev = Event()
-                ev.name = f"Prüfung: {subject}"
-                ev.begin = ex_begin
-                ev.end = ex_end
-                ev.description = info_text
-                ev.uid = f"EXAM|{due.isoformat()}|{subject}"
-                cal.events.add(ev)
+                if key not in created_exam:
+                    created_exam.add(key)
+                    ex_begin = tz.localize(datetime.combine(due, time(8, 0)))
+                    ex_end = ex_begin + timedelta(hours=2)
+                    ev = Event()
+                    ev.name = f"Prüfung: {subject}"
+                    ev.begin = ex_begin
+                    ev.end = ex_end
+                    ev.description = info
+                    ev.uid = f"EXAM|{due.isoformat()}|{subject}"
+                    cal.events.add(ev)
 
-        # 4) Schreiben
+        # ---------- 4) Schreiben ----------
         with open(out_path, "w", encoding="utf-8") as f:
             f.writelines(cal.serialize_iter())
         print(f"ICS geschrieben: {out_path}")
